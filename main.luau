@@ -1,4 +1,6 @@
-game:GetService("HttpService") 
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService") 
 local wsUrl = "ws://localhost:5000"
 local webStreamClient = nil
 
@@ -377,6 +379,60 @@ local function onCloseProject()
 	end)
 end
 
+local function SanitizeFolderName(name)
+	-- Define invalid filename characters (same as Windows / C#)
+	local invalidChars = '<>:"/\\|?*'
+
+	-- Iterate each character like C# foreach
+	for i = 1, #invalidChars do
+		local c = invalidChars:sub(i, i)
+		-- Replace all occurrences of the character with '_'
+		-- Escape gsub pattern characters
+		local pattern = c:match("[%p]") and "%" .. c or c
+		name = name:gsub(pattern, "_")
+	end
+
+	return name
+end
+
+local function edit(instance: Instance, editType: string, property: string, value: string)
+	local uuid = instance:GetAttribute("UUID")
+	if not webStreamClient then
+		print("Not connected to server")
+		return
+	end
+	local id = generateId()
+	local payload = {
+		type = "edit",
+		id = id,
+		args = {
+			target = editType,
+			property = property,
+			value = value,
+			uuid = uuid,
+			action = "modify"
+		}
+	}
+	webStreamClient:Send(HttpService:JSONEncode(payload))
+end
+
+local function delete(instance: Instance)
+	local uuid = instance:GetAttribute("UUID")
+	if not webStreamClient then
+		print("Not connected to server")
+		return
+	end
+	local id = generateId()
+	local payload = {
+		type = "edit",
+		id = id,
+		args = {
+			action = "delete",
+			uuid = uuid
+		}
+	}
+end
+
 -- ------------------- Wire up buttons -------------------
 
 connectBtn.ClickableWhenViewportHidden = true
@@ -392,3 +448,55 @@ openProjectBtn.Click:Connect(onOpenProject)
 closeProjectBtn.Click:Connect(onCloseProject)
 
 updateButtonStates()
+
+local scriptSources = {}
+
+local function trackInstance(instance)
+	-- Track property changes
+	instance.Changed:Connect(function(prop)
+		local value = instance[prop]
+		edit(instance, "property", prop, value)
+	end)
+
+	-- Track script edits
+	if instance:IsA("ModuleScript") or instance:IsA("LocalScript") or instance:IsA("Script") then
+		scriptSources[instance] = instance.Source
+
+		instance:GetPropertyChangedSignal("Source"):Connect(function()
+			local newValue = instance.Source
+			edit(instance, "script", "", newValue)
+			scriptSources[instance] = newValue
+		end)
+	end
+end
+
+-- Track all existing descendants
+for _, obj in ipairs(game:GetDescendants()) do
+	trackInstance(obj)
+end
+
+-- Track future descendants
+game.DescendantAdded:Connect(trackInstance)
+
+-- Track deletion for a single instance
+local function trackDeletion(instance)
+	-- Fires when the instance is destroyed
+	instance.Destroying:Connect(function()
+		delete(instance)
+	end)
+
+	-- Optional: Detect when instance is removed from parent (could indicate deletion)
+	instance.AncestryChanged:Connect(function(_, newParent)
+		if not newParent then
+			delete(instance)
+		end
+	end)
+end
+
+-- Track existing instances
+for _, obj in ipairs(game:GetDescendants()) do
+	trackDeletion(obj)
+end
+
+-- Track new instances added in the future
+game.DescendantAdded:Connect(trackDeletion)
